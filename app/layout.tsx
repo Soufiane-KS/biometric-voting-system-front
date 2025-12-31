@@ -22,6 +22,7 @@ export const metadata: Metadata = {
 
 const navItems = [
   { label: "Login", href: "/auth" },
+  { label: "Register", href: "/register" },
   { label: "Consent", href: "/consent" },
   { label: "Enroll", href: "/enroll" },
   { label: "Vote", href: "/vote" },
