@@ -45,6 +45,26 @@ export default function BiometricEnrollmentPage() {
   const [finished, setFinished] = useState(false);
   const progressTimer = useRef<NodeJS.Timeout | null>(null);
   const finishTimer = useRef<NodeJS.Timeout | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (biometricMethod === "face" && !isScanning && videoRef.current) {
+      navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      });
+    } else if (biometricMethod !== "face" && streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+    }
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [biometricMethod, isScanning]);
 
   useEffect(() => {
     if (isScanning && progress < 100) {
@@ -72,13 +92,39 @@ export default function BiometricEnrollmentPage() {
     setProgress(0);
     setIsScanning(true);
     try {
-      const res = await fetch("/api/enroll", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method: biometricMethod }),
-      });
-      const data = await res.json();
-      if (!data.success || !data.enrolled) throw new Error("Enrollment failed");
+      if (biometricMethod === "face") {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.play();
+        await new Promise((r) => (video.onloadedmetadata = r));
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(video, 0, 0);
+        const imageBlob = await new Promise<Blob>((resolve) =>
+          canvas.toBlob((blob) => resolve(blob!), "image/jpeg")
+        );
+        stream.getTracks().forEach((t) => t.stop());
+        const formData = new FormData();
+        formData.append("image", imageBlob, "face.jpg");
+        formData.append("action", "enroll");
+        const res = await fetch("/api/biometric/face-id", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+        if (!data.success || !data.verified) throw new Error("Face ID enrollment failed");
+      } else {
+        const res = await fetch("/api/enroll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ method: biometricMethod }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.enrolled) throw new Error("Enrollment failed");
+      }
       // Simulate progress UI
       const interval = setInterval(() => {
         setProgress((prev) => {
@@ -183,6 +229,18 @@ export default function BiometricEnrollmentPage() {
                   ? "Enrollment complete! Redirecting..."
                   : `Ready to capture ${biometricMethod === "face" ? "Face ID" : "fingerprint"}`}
               </p>
+              {biometricMethod === "face" && !isScanning && (
+                <div className="relative w-full aspect-square bg-black rounded-lg overflow-hidden">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute inset-0 border-2 border-primary/50 rounded-lg pointer-events-none" />
+                </div>
+              )}
               {isScanning && <Progress value={progress} className="w-full" />}
             </div>
           </CardContent>

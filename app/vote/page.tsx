@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,7 +24,7 @@ import {
 import { Fingerprint, User } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 
-type BiometricMethod = "face" | "fingerprint";
+type BiometricMethod = "face" | "fingerprint" | "faceId";
 
 const validationOptions: {
   value: BiometricMethod;
@@ -33,7 +33,7 @@ const validationOptions: {
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
   {
-    value: "face",
+    value: "faceId",
     title: "Face ID",
     description: "Use the front camera to verify your identity.",
     icon: User,
@@ -235,6 +235,26 @@ export default function VotePage() {
   const [progress, setProgress] = useState(0);
   const [hasValidated, setHasValidated] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (selectedMethod === "faceId" && !isScanning && videoRef.current) {
+      navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      });
+    } else if (selectedMethod !== "faceId" && streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+    }
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [selectedMethod, isScanning]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -263,13 +283,39 @@ export default function VotePage() {
     setProgress(0);
     setHasValidated(false);
     try {
-      const res = await fetch("/api/vote/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidate: selectedCandidate, method: selectedMethod }),
-      });
-      const data = await res.json();
-      if (!data.success || !data.validated) throw new Error("Validation failed");
+      if (selectedMethod === "faceId") {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.play();
+        await new Promise((r) => (video.onloadedmetadata = r));
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(video, 0, 0);
+        const imageBlob = await new Promise<Blob>((resolve) =>
+          canvas.toBlob((blob) => resolve(blob!), "image/jpeg")
+        );
+        stream.getTracks().forEach((t) => t.stop());
+        const formData = new FormData();
+        formData.append("image", imageBlob, "face.jpg");
+        formData.append("action", "auth");
+        const res = await fetch("/api/biometric/face-id", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+        if (!data.success || !data.verified) throw new Error("Face ID validation failed");
+      } else {
+        const res = await fetch("/api/vote/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidate: selectedCandidate, method: selectedMethod }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.validated) throw new Error("Validation failed");
+      }
       // Simulate progress UI
       const interval = setInterval(() => {
         setProgress((prev) => {
@@ -411,12 +457,24 @@ export default function VotePage() {
                 <p className="mt-3 text-sm text-muted-foreground">
                   {selectedCandidate
                     ? isScanning
-                      ? `Validating ${selectedMethod === "face" ? "Face ID" : "Fingerprint"}...`
+                      ? `Validating ${selectedMethod === "faceId" ? "Face ID" : "Fingerprint"}...`
                       : hasValidated
                       ? "Validation complete. You can now cast your vote."
                       : "Start validation to confirm it’s you."
                     : "Select a candidate to begin validation."}
                 </p>
+                {selectedMethod === "faceId" && !isScanning && selectedCandidate && (
+                  <div className="relative w-full aspect-square bg-black rounded-lg overflow-hidden mt-3">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-0 border-2 border-primary/50 rounded-lg pointer-events-none" />
+                  </div>
+                )}
                 {isScanning && <Progress value={progress} className="mt-3 w-full" />}
                 <Button
                   type="button"

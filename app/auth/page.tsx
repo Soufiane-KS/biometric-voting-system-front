@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -23,7 +23,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useRouter } from "next/navigation";
-import { Fingerprint, Key } from "lucide-react";
+import { Fingerprint, Key, User } from "lucide-react";
 
 const formSchema = z.object({
   email: z.string().email({
@@ -34,7 +34,7 @@ const formSchema = z.object({
   }),
 });
 
-type AuthMethod = "password" | "fingerprint";
+type AuthMethod = "password" | "fingerprint" | "faceId";
 
 const methodOptions: { value: AuthMethod; title: string; description: string }[] =
   [
@@ -48,6 +48,11 @@ const methodOptions: { value: AuthMethod; title: string; description: string }[]
       title: "Fingerprint",
       description: "Quick biometric login",
     },
+    {
+      value: "faceId",
+      title: "Face ID",
+      description: "Use the front camera",
+    },
   ];
 
 const authStats = [
@@ -60,6 +65,8 @@ export default function AuthenticationPage() {
   const router = useRouter();
   const [authMethod, setAuthMethod] = useState<AuthMethod>("password");
   const [isScanning, setIsScanning] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -69,6 +76,24 @@ export default function AuthenticationPage() {
   });
   const emailValue = form.watch("email");
   const hasEmail = Boolean(emailValue?.trim());
+
+  useEffect(() => {
+    if (authMethod === "faceId" && !isScanning && videoRef.current) {
+      navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      });
+    } else if (authMethod !== "faceId" && streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+    }
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [authMethod, isScanning]);
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
     try {
@@ -95,13 +120,40 @@ export default function AuthenticationPage() {
 
     setIsScanning(true);
     try {
-      const res = await fetch("/api/auth/biometric", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: emailValue }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error("Biometric auth failed");
+      if (authMethod === "faceId") {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.play();
+        await new Promise((r) => (video.onloadedmetadata = r));
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(video, 0, 0);
+        const imageBlob = await new Promise<Blob>((resolve) =>
+          canvas.toBlob((blob) => resolve(blob!), "image/jpeg")
+        );
+        stream.getTracks().forEach((t) => t.stop());
+        const formData = new FormData();
+        formData.append("image", imageBlob, "face.jpg");
+        formData.append("action", "auth");
+        formData.append("email", emailValue);
+        const res = await fetch("/api/biometric/face-id", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+        if (!data.success || !data.verified) throw new Error("Face ID auth failed");
+      } else {
+        const res = await fetch("/api/auth/biometric", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: emailValue }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error("Biometric auth failed");
+      }
       // TODO: Store JWT/session (e.g., localStorage, cookie, context)
       router.push("/consent");
     } catch (err) {
@@ -117,7 +169,7 @@ export default function AuthenticationPage() {
       <div className="mx-auto flex max-w-[1200px] flex-col gap-10 px-4 py-16 lg:flex-row">
         <div className="flex-1 rounded-3xl bg-gradient-to-br from-primary/80 via-primary/40 to-indigo-700 p-10 shadow-[0_30px_60px_rgba(15,23,42,0.6)]">
           <p className="text-xs font-semibold uppercase tracking-[0.4em] text-white/80">
-            Front-End Vote
+            Log in
           </p>
           <h1 className="mt-6 text-4xl font-semibold leading-tight text-white sm:text-5xl">
             Secure access to Morocco’s voting platform
@@ -181,6 +233,8 @@ export default function AuthenticationPage() {
                         <div className="flex w-full items-center gap-3 text-sm font-semibold leading-tight">
                           {method.value === "fingerprint" ? (
                             <Fingerprint className="h-5 w-5 text-primary" />
+                          ) : method.value === "faceId" ? (
+                            <User className="h-5 w-5 text-primary" />
                           ) : (
                             <Key className="h-5 w-5 text-primary" />
                           )}
@@ -210,19 +264,43 @@ export default function AuthenticationPage() {
                   <div className="space-y-3 rounded-2xl border border-primary/40 bg-primary/5 p-4">
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="font-semibold">Fingerprint ready</p>
+                        <p className="font-semibold">
+                          {authMethod === "faceId" ? "Face ID ready" : "Fingerprint ready"}
+                        </p>
                         <p className="text-sm text-muted-foreground">
-                          Place your finger on the reader on your device.
+                          {authMethod === "faceId"
+                            ? "Look at the front camera to verify."
+                            : "Place your finger on the reader on your device."}
                         </p>
                       </div>
-                      <Fingerprint className="h-6 w-6 text-primary" />
+                      {authMethod === "faceId" ? (
+                        <User className="h-6 w-6 text-primary" />
+                      ) : (
+                        <Fingerprint className="h-6 w-6 text-primary" />
+                      )}
                     </div>
+                    {authMethod === "faceId" && (
+                      <div className="relative w-full aspect-square bg-black rounded-lg overflow-hidden">
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="absolute inset-0 border-2 border-primary/50 rounded-lg pointer-events-none" />
+                      </div>
+                    )}
                     <Button
                       type="button"
                       onClick={handleFingerprintAuth}
                       disabled={isScanning || !hasEmail}
                     >
-                      {isScanning ? "Scanning..." : "Authenticate with fingerprint"}
+                      {isScanning
+                        ? "Scanning..."
+                        : authMethod === "faceId"
+                        ? "Authenticate with Face ID"
+                        : "Authenticate with fingerprint"}
                     </Button>
                   </div>
                 )}
